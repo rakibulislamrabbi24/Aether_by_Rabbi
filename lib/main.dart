@@ -61,8 +61,13 @@ class DownloadTask {
     List<double>? partProgress,
   }) : partProgress = partProgress ?? List<double>.filled(threads, 0.0);
 
-  double get progress =>
-      totalBytes > 0 ? (downloadedBytes / totalBytes).clamp(0.0, 1.0) : 0.0;
+  double get progress {
+    if (totalBytes <= 0) return 0.0;
+    final double ratio = downloadedBytes / totalBytes;
+    if (ratio < 0.0) return 0.0;
+    if (ratio > 1.0) return 1.0;
+    return ratio;
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -79,8 +84,8 @@ class DownloadTask {
       };
 
   factory DownloadTask.fromJson(Map<String, dynamic> json) {
-    int t = (json['threads'] as num?)?.toInt() ?? 4;
-    List<double> pp = json['partProgress'] != null
+    final int t = (json['threads'] as num?)?.toInt() ?? 4;
+    final List<double> pp = json['partProgress'] != null
         ? List<double>.from(
             (json['partProgress'] as List).map((x) => (x as num).toDouble()))
         : List<double>.filled(t, 0.0);
@@ -214,10 +219,14 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
 
   void _showSocialQualitySelector(String pageUrl, int threads) {
     final List<SocialFormatOption> formats = [
-      SocialFormatOption(label: 'Full HD Video • 1080p (MP4)', quality: '1080', ext: 'mp4'),
-      SocialFormatOption(label: 'HD Video • 720p (MP4)', quality: '720', ext: 'mp4'),
-      SocialFormatOption(label: 'Standard Video • 480p (MP4)', quality: '480', ext: 'mp4'),
-      SocialFormatOption(label: 'Data Saver Video • 360p (MP4)', quality: '360', ext: 'mp4'),
+      SocialFormatOption(
+          label: 'Full HD Video • 1080p (MP4)', quality: '1080', ext: 'mp4'),
+      SocialFormatOption(
+          label: 'HD Video • 720p (MP4)', quality: '720', ext: 'mp4'),
+      SocialFormatOption(
+          label: 'Standard Video • 480p (MP4)', quality: '480', ext: 'mp4'),
+      SocialFormatOption(
+          label: 'Data Saver Video • 360p (MP4)', quality: '360', ext: 'mp4'),
       SocialFormatOption(
           label: 'High Quality Audio Only • MP3 (320kbps)',
           quality: 'audio',
@@ -239,7 +248,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
           children: [
             const Row(
               children: [
-                Icon(Icons.Auto_awesome, color: Color(0xFF00F0FF)),
+                Icon(Icons.bolt, color: Color(0xFF00F0FF)),
                 SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -325,9 +334,8 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
 
     String? directUrl;
     String fileName =
-        'RDM_${opt.quality}p_${DateTime.now().millisecondsSinceEpoch}.${opt.ext}';
+        'RDM_${opt.quality}_${DateTime.now().millisecondsSinceEpoch}.${opt.ext}';
 
-    // মাল্টি-এন্ডপয়েন্ট ক্লাউড এক্সট্রাক্টর (YouTube, FB, Insta, TikTok)
     final List<String> apiEndpoints = [
       'https://api.cobalt.tools/api/json',
       'https://co.wuk.sh/api/json',
@@ -376,7 +384,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-                'Cloud extractor busy! Try pasting a direct video link or retry in a moment.'),
+                'Extractor busy! Please paste a direct file/video link or try another link.'),
             backgroundColor: Colors.orangeAccent,
           ),
         );
@@ -465,7 +473,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
   Future<void> _runMultiPartDownload(DownloadTask task) async {
     final int n = task.threads;
     final int chunkSize = (task.totalBytes / n).ceil();
-    List<int> partDownloaded = List<int>.filled(n, 0);
+    final List<int> partDownloaded = List<int>.filled(n, 0);
     if (task.partProgress.length != n) {
       task.partProgress = List<double>.filled(n, 0.0);
     }
@@ -473,7 +481,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
     int lastTotalBytes = task.downloadedBytes;
     DateTime lastSpeedTime = DateTime.now();
 
-    List<Future<void>> futures = [];
+    final List<Future<void>> futures = [];
 
     for (int i = 0; i < n; i++) {
       final int start = i * chunkSize;
@@ -494,7 +502,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
         }
 
         partDownloaded[i] = existing;
-        final reqStart = start + existing;
+        final int reqStart = start + existing;
 
         final response = await _dio.get<ResponseBody>(
           task.url,
@@ -512,20 +520,21 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
             if (task.cancelToken!.isCancelled) break;
             raf.writeFromSync(chunk);
             partDownloaded[i] += chunk.length;
+            final double pRatio = partDownloaded[i] / partTotal;
             task.partProgress[i] =
-                (partDownloaded[i] / partTotal).clamp(0.0, 1.0);
+                pRatio < 0.0 ? 0.0 : (pRatio > 1.0 ? 1.0 : pRatio);
 
             final now = DateTime.now();
             final diff = now.difference(lastSpeedTime).inMilliseconds;
             if (diff >= 600) {
               int currentSum = 0;
-              for (int val in partDownloaded) {
+              for (final int val in partDownloaded) {
                 currentSum += val;
               }
               task.downloadedBytes = currentSum;
               final bytesDiff = currentSum - lastTotalBytes;
               final speedBps = (bytesDiff * 1000) / diff;
-              String speedText = speedBps > 1024 * 1024
+              final String speedText = speedBps > 1024 * 1024
                   ? '${(speedBps / (1024 * 1024)).toStringAsFixed(2)} MB/s'
                   : '${(speedBps / 1024).toStringAsFixed(1)} KB/s';
 
@@ -612,7 +621,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
         if (diff >= 600) {
           final bytesDiff = task.downloadedBytes - lastBytes;
           final speedBps = (bytesDiff * 1000) / diff;
-          String speedText = speedBps > 1024 * 1024
+          final String speedText = speedBps > 1024 * 1024
               ? '${(speedBps / (1024 * 1024)).toStringAsFixed(2)} MB/s'
               : '${(speedBps / 1024).toStringAsFixed(1)} KB/s';
 
@@ -626,13 +635,4 @@ class _RDMHomeScreenState extends State<RDMHomeScreen>
       await raf.close();
     }
 
-    if (!task.cancelToken!.isCancelled) {
-      setState(() {
-        task.status = 'Completed';
-        task.speed = 'Done';
-      });
-      await _saveHistory();
-    }
-  }
-
-  void _pauseTask(
+    if (!task.canc
