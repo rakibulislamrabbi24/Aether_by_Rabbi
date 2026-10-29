@@ -1,4 +1,4 @@
-name: Build RDM Pro APK
+name: Build and Release RDM Pro APK
 
 on:
   push:
@@ -35,14 +35,24 @@ jobs:
           sed -i 's/android:label="rdm_pro"/android:label="RDM Pro"/g' android/app/src/main/AndroidManifest.xml
           sed -i 's/<application/<application android:requestLegacyExternalStorage="true"/g' android/app/src/main/AndroidManifest.xml
 
+      - name: Enable Core Library Desugaring in Gradle
+        run: |
+          BUILD_GRADLE="android/app/build.gradle"
+          echo "coreLibraryDesugaringEnabled true" >> tmp_desugar.txt
+          sed -i '/defaultConfig {/r tmp_desugar.txt' $BUILD_GRADLE
+          sed -i '/dependencies {/a implementation("androidx.core:core-ktx:1.12.0")\ncoreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")' $BUILD_GRADLE
+
       - name: Install Dependencies
         run: flutter pub get
 
       - name: Build Release APK
         run: flutter build apk --release
 
-      - name: Upload RDM Pro APK
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release & Upload APK
+        uses: ncipollo/release-action@v1
         with:
-          name: RDM-Pro-v1.2-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          artifacts: "build/app/outputs/flutter-apk/app-release.apk"
+          tag: "v1.2-${{ github.run_number }}"
+          name: "RDM Pro v1.2 (Build ${{ github.run_number }})"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: true
