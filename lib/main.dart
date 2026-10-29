@@ -248,4 +248,170 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
           if (t.cancelToken!.isCancelled) break;
           raf.writeFromSync(c);
           pBytes[i] += c.length;
-          t.partProgress[i] = (pBytes[i] / pTotal).clamp(
+          t.partProgress[i] = (pBytes[i] / pTotal).clamp(0.0, 1.0);
+          final now = DateTime.now(), diff = now.difference(lastTime).inMilliseconds;
+          if (diff >= 600) {
+            int sum = 0; for (final v in pBytes) { sum += v; }
+            t.downloadedBytes = sum;
+            final bps = ((sum - lastSum) * 1000) / diff;
+            if (mounted) setState(() => t.speed = bps > 1048576 ? '${(bps / 1048576).toStringAsFixed(2)} MB/s' : '${(bps / 1024).toStringAsFixed(1)} KB/s');
+            lastSum = sum; lastTime = now;
+          }
+        }
+      } finally { await raf.close(); }
+    }));
+
+    if (t.cancelToken!.isCancelled) return;
+    setState(() { t.status = 'Merging...'; t.speed = 'Joining'; });
+    final sink = File(t.savePath).openWrite(mode: FileMode.write);
+    for (int i = 0; i < n; i++) {
+      final pf = File('${t.savePath}.part$i');
+      if (await pf.exists()) { await sink.addStream(pf.openRead()); await pf.delete(); }
+    }
+    await sink.close();
+    setState(() { t.downloadedBytes = t.totalBytes; t.status = 'Completed'; t.speed = 'Done'; });
+    await _saveHistory();
+  }
+
+  Future<void> _singleStream(DownloadTask t) async {
+    final f = File(t.savePath);
+    int exist = await f.exists() ? await f.length() : 0;
+    t.downloadedBytes = exist;
+    final res = await _dio.get<ResponseBody>(t.url, cancelToken: t.cancelToken, options: Options(responseType: ResponseType.stream, headers: exist > 0 ? {'Range': 'bytes=$exist-'} : null));
+    final part = res.statusCode == 206;
+    if (!part && exist > 0) { exist = 0; t.downloadedBytes = 0; }
+    final len = int.tryParse(res.headers.value(Headers.contentLengthHeader) ?? '0') ?? 0;
+    if (len > 0) t.totalBytes = exist + len;
+    final raf = f.openSync(mode: part ? FileMode.append : FileMode.write);
+    int lastB = t.downloadedBytes; DateTime lastT = DateTime.now();
+    try {
+      await for (final c in res.data!.stream) {
+        if (t.cancelToken!.isCancelled) break;
+        raf.writeFromSync(c); t.downloadedBytes += c.length; t.partProgress[0] = t.progress;
+        final now = DateTime.now(), diff = now.difference(lastT).inMilliseconds;
+        if (diff >= 600) {
+          final bps = ((t.downloadedBytes - lastB) * 1000) / diff;
+          if (mounted) setState(() => t.speed = bps > 1048576 ? '${(bps / 1048576).toStringAsFixed(2)} MB/s' : '${(bps / 1024).toStringAsFixed(1)} KB/s');
+          _saveHistory(); lastB = t.downloadedBytes; lastT = now;
+        }
+      }
+    } finally { await raf.close(); }
+    if (!t.cancelToken!.isCancelled) { setState(() { t.status = 'Completed'; t.speed = 'Done'; }); await _saveHistory(); }
+  }
+
+  String _fmt(int b) => b <= 0 ? '0 B' : (b > 1048576 ? '${(b / 1048576).toStringAsFixed(2)} MB' : '${(b / 1024).toStringAsFixed(1)} KB');
+
+  void _showAddDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          backgroundColor: const Color(0xFF151C2C),
+          title: const Text('New Turbo Download', style: TextStyle(color: Color(0xFF00F0FF))),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: _urlCtrl, decoration: const InputDecoration(hintText: 'Paste Direct, YT, FB or TikTok link...')),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [1, 4, 8].map((n) => ChoiceChip(
+                  label: Text('${n}x'), selected: _threads == n,
+                  selectedColor: const Color(0xFF00F0FF),
+                  labelStyle: TextStyle(color: _threads == n ? Colors.black : Colors.white),
+                  onSelected: (_) => setS(() => _threads = n),
+                )).toList(),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00F0FF), foregroundColor: Colors.black),
+              onPressed: () { final u = _urlCtrl.text.trim(); _urlCtrl.clear(); Navigator.pop(ctx); _handleInput(u, _threads); },
+              child: const Text('Start'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF151C2C),
+        title: const Text('RDM PRO v1.3', style: TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.w900)),
+      ),
+      body: _tasks.isEmpty
+          ? const Center(child: Text('Turbo 8x & Social Engine Ready\nTap + to start downloading', textAlign: TextAlign.center, style: TextStyle(color: Color(0xFF00FF87))))
+          : ListView.builder(
+              padding: const EdgeInsets.all(12), itemCount: _tasks.length,
+              itemBuilder: (ctx, i) {
+                final t = _tasks[i], active = t.status == 'Downloading', done = t.status == 'Completed';
+                return Card(
+                  color: const Color(0xFF151C2C), margin: const EdgeInsets.only(bottom: 12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Text('[${t.threads}x] ', style: const TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.bold)),
+                            Expanded(child: Text(t.fileName, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold))),
+                            if (!done) IconButton(
+                              icon: Icon(active ? Icons.pause_circle : Icons.play_circle, color: const Color(0xFF00FF87)),
+                              onPressed: () { if (active) { t.cancelToken?.cancel(); setState(() => t.status = 'Paused'); } else { _startTask(t); } },
+                            ),
+                            IconButton(icon: const Icon(Icons.delete, color: Colors.redAccent), onPressed: () { t.cancelToken?.cancel(); setState(() => _tasks.removeAt(i)); _saveHistory(); }),
+                          ],
+                        ),
+                        LinearProgressIndicator(value: t.progress, minHeight: 6, backgroundColor: const Color(0xFF0A0E17), valueColor: const AlwaysStoppedAnimation(Color(0xFF00F0FF))),
+                        if (t.threads > 1 && !done) Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Row(
+                            children: List.generate(t.threads, (pi) => Expanded(
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 1),
+                                child: LinearProgressIndicator(value: pi < t.partProgress.length ? t.partProgress[pi] : 0.0, minHeight: 3, valueColor: const AlwaysStoppedAnimation(Color(0xFF00FF87))),
+                              ),
+                            )),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text('${_fmt(t.downloadedBytes)} / ${_fmt(t.totalBytes)} (${(t.progress * 100).toStringAsFixed(1)}%)', style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                            Text('${t.status} • ${t.speed}', style: const TextStyle(fontSize: 12, color: Color(0xFF00FF87), fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                        if (done) Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text('Saved: ${t.savePath}', style: const TextStyle(fontSize: 11, color: Color(0xFF00F0FF))),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+      floatingActionButton: FloatingActionButton.extended(
+        backgroundColor: const Color(0xFF00F0FF), foregroundColor: Colors.black,
+        onPressed: _showAddDialog, icon: const Icon(Icons.bolt), label: const Text('Turbo Link', style: TextStyle(fontWeight: FontWeight.bold)),
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        backgroundColor: const Color(0xFF151C2C), selectedItemColor: const Color(0xFF00F0FF),
+        currentIndex: _tab, onTap: (v) => setState(() => _tab = v),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.download), label: 'Downloads'),
+          BottomNavigationBarItem(icon: Icon(Icons.language), label: 'Browser'),
+          BottomNavigationBarItem(icon: Icon(Icons.hub), label: 'Torrents'),
+        ],
+      ),
+    );
+  }
+}
+// END OF RDM PRO
