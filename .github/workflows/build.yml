@@ -44,14 +44,14 @@ jobs:
       - name: Build Release APK
         run: |
           flutter build apk --release
-          cp build/app/outputs/flutter-apk/app-release.apk RDM-Pro.apk
+          cp build/app/outputs/flutter-apk/app-release.apk RDM-Pro-v1.3.apk
 
       - name: Create GitHub Release & Upload APK
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "RDM-Pro.apk"
-          tag: "v1.2.1-${{ github.run_number }}"
-          name: "RDM Pro v1.2.1 (Build ${{ github.run_number }})"
+          artifacts: "RDM-Pro-v1.3.apk"
+          tag: "v1.3-${{ github.run_number }}"
+          name: "RDM Pro v1.3 Turbo & YT (Build ${{ github.run_number }})"
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           
