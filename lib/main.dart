@@ -48,7 +48,7 @@ class DownloadTask {
     this.totalBytes = 0,
     this.status = 'Paused',
     this.speed = '0 KB/s',
-    this.threads = 4,
+    this.threads = 8,
     List<double>? partProgress,
   }) : partProgress = partProgress ?? List<double>.filled(threads, 0.0);
 
@@ -62,13 +62,13 @@ class DownloadTask {
   };
 
   factory DownloadTask.fromJson(Map<String, dynamic> j) {
-    int t = (j['threads'] as num?)?.toInt() ?? 4;
+    int t = (j['threads'] as num?)?.toInt() ?? 8;
     List<double> pp = j['partProgress'] != null
         ? List<double>.from((j['partProgress'] as List).map((x) => (x as num).toDouble()))
         : List<double>.filled(t, 0.0);
     return DownloadTask(
       id: j['id']?.toString() ?? '', url: j['url']?.toString() ?? '',
-      fileName: j['fileName']?.toString() ?? 'file.mp4', savePath: j['savePath']?.toString() ?? '',
+      fileName: j['fileName']?.toString() ?? 'video.mp4', savePath: j['savePath']?.toString() ?? '',
       downloadedBytes: (j['downloadedBytes'] as num?)?.toInt() ?? 0,
       totalBytes: (j['totalBytes'] as num?)?.toInt() ?? 0,
       status: j['status']?.toString() ?? 'Paused', threads: t, partProgress: pp,
@@ -110,13 +110,13 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
 
   Future<void> _loadHistory() async {
     final p = await SharedPreferences.getInstance();
-    final l = p.getStringList('rdm_tasks_v6');
+    final l = p.getStringList('rdm_tasks_v7');
     if (l != null) setState(() => _tasks = l.map((e) => DownloadTask.fromJson(jsonDecode(e))).toList());
   }
 
   Future<void> _saveHistory() async {
     final p = await SharedPreferences.getInstance();
-    await p.setStringList('rdm_tasks_v6', _tasks.map((t) => jsonEncode(t.toJson())).toList());
+    await p.setStringList('rdm_tasks_v7', _tasks.map((t) => jsonEncode(t.toJson())).toList());
   }
 
   Future<String> _getSavePath(String name) async {
@@ -130,12 +130,12 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     return '${d.path}/$clean';
   }
 
-  bool _isSocial(String u) => RegExp(r'(youtube\.com|youtu\.be|facebook\.com|fb\.watch|instagram\.com|tiktok\.com|twitter\.com|x\.com)').hasMatch(u.toLowerCase());
+  bool _isSocial(String u) => RegExp(r'(youtube\.com|youtu\.be|facebook\.com|fb\.watch|fb\.com|instagram\.com|tiktok\.com)').hasMatch(u.toLowerCase());
 
   void _handleInput(String url, int threads) {
     if (url.isEmpty) return;
     if (_isSocial(url)) {
-      _showQualitySheet(url, threads);
+      _extractMediaStreams(url, threads);
     } else {
       String name = url.split('/').last.split('?').first;
       if (name.isEmpty || !name.contains('.')) name = 'RDM_${DateTime.now().millisecondsSinceEpoch}.mp4';
@@ -143,50 +143,197 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     }
   }
 
-  void _showQualitySheet(String pageUrl, int threads) {
-    final opts = [
-      {'l': 'Full HD Video • 1080p', 'q': '1080', 'e': 'mp4', 'a': false},
-      {'l': 'HD Video • 720p', 'q': '720', 'e': 'mp4', 'a': false},
-      {'l': 'Standard Video • 480p', 'q': '480', 'e': 'mp4', 'a': false},
-      {'l': 'Data Saver • 360p', 'q': '360', 'e': 'mp4', 'a': false},
-      {'l': 'Audio Only • MP3 (320kbps)', 'q': 'audio', 'e': 'mp3', 'a': true},
+  String _cleanEscapedUrl(String raw) {
+    return raw
+        .replaceAll(r'\/', '/')
+        .replaceAll(r'\u0025', '%')
+        .replaceAll(r'\u0026', '&')
+        .replaceAll(r'\u003C', '<')
+        .replaceAll(r'\u003E', '>')
+        .replaceAll(r'\u003D', '=')
+        .replaceAll('&amp;', '&');
+  }
+
+  Future<void> _extractMediaStreams(String pageUrl, int threads) async {
+    showDialog(
+      context: context, barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        backgroundColor: Color(0xFF151C2C),
+        content: Row(
+          children: [
+            CircularProgressIndicator(color: Color(0xFF00F0FF)),
+            SizedBox(width: 16),
+            Expanded(child: Text('Scanning page for direct video streams...')),
+          ],
+        ),
+      ),
+    );
+
+    List> foundStreams = [];
+    final lower = pageUrl.toLowerCase();
+
+    try {
+      // ১. নিজস্ব লোকাল স্ক্র্যাপার (Facebook, Reels, Instagram, TikTok)
+      if (lower.contains('facebook.com') || lower.contains('fb.watch') || lower.contains('fb.com') || lower.contains('instagram.com')) {
+        foundStreams = await _scrapeFacebookOrInsta(pageUrl);
+      } else if (lower.contains('youtube.com') || lower.contains('youtu.be')) {
+        foundStreams = await _scrapeYouTube(pageUrl);
+      } else if (lower.contains('tiktok.com')) {
+        foundStreams = await _scrapeTikTok(pageUrl);
+      }
+    } catch (_) {}
+
+    if (mounted) Navigator.pop(context);
+
+    if (foundStreams.isNotEmpty) {
+      _showStreamPicker(foundStreams, threads);
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not extract private/encrypted link! Make sure the video is Public.'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
+  }
+
+  // ফেসবুক ও ইন্সটাগ্রাম নেটিভ ডিরেক্ট গ্র্যাবার (No Third-Party Server Needed!)
+  Future<List>> _scrapeFacebookOrInsta(String url) async {
+    List> list = [];
+    final headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Sec-Fetch-Mode': 'navigate',
+    };
+
+    final res = await _dio.get<String>(url, options: Options(headers: headers, followRedirects: true, validateStatus: (s) => true));
+    String html = res.data ?? '';
+
+    // মোবাইল বা রিলস লিংক হলে ডেস্কটপ/এমবেড ভার্সনও চেক করা হবে
+    if (!html.contains('.mp4')) {
+      final mbUrl = url.replaceFirst('www.facebook.com', 'm.facebook.com');
+      final res2 = await _dio.get<String>(mbUrl, options: Options(headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      }, followRedirects: true, validateStatus: (s) => true));
+      html += '\n${res2.data ?? ''}';
+    }
+
+    final Map<String, RegExp> patterns = {
+      'Full HD Video (MP4)': RegExp(r'"(?:playable_url_quality_hd|hd_src|hd_src_no_ratelimit|browser_native_hd_url)"\s*:\s*"([^"]+)"'),
+      'Standard SD Video (MP4)': RegExp(r'"(?:playable_url|sd_src|sd_src_no_ratelimit|browser_native_sd_url|video_url)"\s*:\s*"([^"]+)"'),
+      'Direct Meta Video (MP4)': RegExp(r'property="og:video(?::url|:secure_url)?"\s+content="([^"]+)"'),
+    };
+
+    patterns.forEach((label, reg) {
+      final match = reg.firstMatch(html);
+      if (match != null && match.group(1) != null) {
+        final link = _cleanEscapedUrl(match.group(1)!);
+        if (link.startsWith('http') && !list.any((e) => e['url'] == link)) {
+          list.add({'label': label, 'url': link, 'ext': 'mp4'});
+        }
+      }
+    });
+
+    // যদি উপরের কী-ওয়ার্ড ছাড়া সরাসরি mp4 স্ট্রিম থাকে
+    if (list.isEmpty) {
+      final rawMp4 = RegExp(r'"(https?:\\?/\\?/[^"]*?\.mp4[^"]*?)"').allMatches(html);
+      int count = 1;
+      for (final m in rawMp4.take(3)) {
+        final link = _cleanEscapedUrl(m.group(1)!);
+        if (!list.any((e) => e['url'] == link)) {
+          list.add({'label': 'Video Stream #$count (MP4)', 'url': link, 'ext': 'mp4'});
+          count++;
+        }
+      }
+    }
+    return list;
+  }
+
+  // টিকটক ডিরেক্ট গ্র্যাবার (TikWM Public API)
+  Future<List>> _scrapeTikTok(String url) async {
+    List> list = [];
+    try {
+      final r = await _dio.post('https://www.tikwm.com/api/', data: {'url': url, 'hd': 1});
+      if (r.data is Map && r.data['data'] != null) {
+        final d = r.data['data'];
+        if (d['hdplay'] != null) list.add({'label': 'No-Watermark HD (MP4)', 'url': d['hdplay'].toString(), 'ext': 'mp4'});
+        if (d['play'] != null) list.add({'label': 'No-Watermark SD (MP4)', 'url': d['play'].toString(), 'ext': 'mp4'});
+        if (d['music'] != null) list.add({'label': 'Original Audio (MP3)', 'url': d['music'].toString(), 'ext': 'mp3'});
+      }
+    } catch (_) {}
+    return list;
+  }
+
+  // ইউটিউব মাল্টি-নোড এক্সট্রাক্টর (Piped Open Nodes)
+  Future<List>> _scrapeYouTube(String url) async {
+    List> list = [];
+    String? vid;
+    final reg = RegExp(r'(?:v=|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})');
+    final m = reg.firstMatch(url);
+    if (m != null) vid = m.group(1);
+    if (vid == null) return list;
+
+    final nodes = [
+      'https://pipedapi.kavin.rocks',
+      'https://pipedapi.tokhmi.xyz',
+      'https://pipedapi.moomoo.me',
+      'https://api.piped.projectsegfau.lt',
     ];
+
+    for (final node in nodes) {
+      try {
+        final r = await _dio.get('$node/streams/$vid', options: Options(receiveTimeout: const Duration(seconds: 8)));
+        if (r.data is Map) {
+          final vStreams = (r.data['videoStreams'] as List?) ?? [];
+          for (final vs in vStreams) {
+            if (vs['videoOnly'] == false && vs['url'] != null) {
+              list.add({
+                'label': 'Video • ${vs['quality']} (${vs['format']})',
+                'url': vs['url'].toString(),
+                'ext': 'mp4',
+              });
+            }
+          }
+          final aStreams = (r.data['audioStreams'] as List?) ?? [];
+          if (aStreams.isNotEmpty && aStreams.first['url'] != null) {
+            list.add({
+              'label': 'Audio Only • High Bitrate (M4A/MP3)',
+              'url': aStreams.first['url'].toString(),
+              'ext': 'm4a',
+            });
+          }
+          if (list.isNotEmpty) break;
+        }
+      } catch (_) {}
+    }
+    return list;
+  }
+
+  void _showStreamPicker(List> streams, int threads) {
     showModalBottomSheet(
       context: context, backgroundColor: const Color(0xFF151C2C),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (ctx) => ListView(
         shrinkWrap: true, padding: const EdgeInsets.all(16),
         children: [
-          Text('Select Quality ($threads Threads)', style: const TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.bold, fontSize: 16)),
+          Text('Streams Found (Turbo ${threads}x Ready)', style: const TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.bold, fontSize: 16)),
           const Divider(color: Colors.white24),
-          ...opts.map((o) => ListTile(
-            leading: Icon((o['a'] as bool) ? Icons.audiotrack : Icons.videocam, color: const Color(0xFF00FF87)),
-            title: Text(o['l'].toString()),
-            onTap: () { Navigator.pop(ctx); _extractSocial(pageUrl, o, threads); },
+          ...streams.map((s) => ListTile(
+            leading: Icon(s['ext'] == 'mp3' || s['ext'] == 'm4a' ? Icons.audiotrack : Icons.videocam, color: const Color(0xFF00FF87)),
+            title: Text(s['label']!, style: const TextStyle(fontWeight: FontWeight.bold)),
+            trailing: const Icon(Icons.download_for_offline, color: Color(0xFF00F0FF)),
+            onTap: () {
+              Navigator.pop(ctx);
+              final name = 'RDM_${DateTime.now().millisecondsSinceEpoch}.${s['ext']}';
+              _addTask(s['url']!, name, threads);
+            },
           )),
         ],
       ),
     );
-  }
-
-  Future<void> _extractSocial(String url, Map<String, Object> o, int threads) async {
-    String? dlUrl;
-    String fName = 'RDM_${o['q']}_${DateTime.now().millisecondsSinceEpoch}.${o['e']}';
-    for (final api in ['https://api.cobalt.tools/api/json', 'https://co.wuk.sh/api/json']) {
-      try {
-        final r = await _dio.post(api, data: {'url': url, 'vQuality': (o['a'] as bool) ? '720' : o['q'], 'isAudioOnly': o['a'], 'aFormat': 'mp3'},
-            options: Options(headers: {'Accept': 'application/json', 'Content-Type': 'application/json'}));
-        if (r.data is Map && r.data['url'] != null) {
-          dlUrl = r.data['url'].toString();
-          if (r.data['filename'] != null) fName = r.data['filename'].toString();
-          break;
-        }
-      } catch (_) {}
-    }
-    if (dlUrl != null) {
-      _addTask(dlUrl, fName, threads);
-    } else if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Extractor busy! Paste a direct link.')));
-    }
   }
 
   Future<void> _addTask(String url, String name, int threads) async {
@@ -205,7 +352,10 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
       int total = t.totalBytes;
       bool ranged = false;
       try {
-        final h = await _dio.get<ResponseBody>(t.url, cancelToken: t.cancelToken, options: Options(responseType: ResponseType.stream, headers: {'Range': 'bytes=0-0'}));
+        final h = await _dio.get<ResponseBody>(t.url, cancelToken: t.cancelToken, options: Options(
+          responseType: ResponseType.stream,
+          headers: {'Range': 'bytes=0-0', 'User-Agent': 'Mozilla/5.0'},
+        ));
         if (h.statusCode == 206) {
           ranged = true;
           final cr = h.headers.value('content-range');
@@ -241,7 +391,10 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
       int exist = await pf.exists() ? await pf.length() : 0;
       if (exist >= pTotal) { pBytes[i] = pTotal; t.partProgress[i] = 1.0; return; }
       pBytes[i] = exist;
-      final res = await _dio.get<ResponseBody>(t.url, cancelToken: t.cancelToken, options: Options(responseType: ResponseType.stream, headers: {'Range': 'bytes=${start + exist}-$end'}));
+      final res = await _dio.get<ResponseBody>(t.url, cancelToken: t.cancelToken, options: Options(
+        responseType: ResponseType.stream,
+        headers: {'Range': 'bytes=${start + exist}-$end', 'User-Agent': 'Mozilla/5.0'},
+      ));
       final raf = pf.openSync(mode: exist > 0 ? FileMode.append : FileMode.write);
       try {
         await for (final c in res.data!.stream) {
@@ -277,7 +430,10 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     final f = File(t.savePath);
     int exist = await f.exists() ? await f.length() : 0;
     t.downloadedBytes = exist;
-    final res = await _dio.get<ResponseBody>(t.url, cancelToken: t.cancelToken, options: Options(responseType: ResponseType.stream, headers: exist > 0 ? {'Range': 'bytes=$exist-'} : null));
+    final res = await _dio.get<ResponseBody>(t.url, cancelToken: t.cancelToken, options: Options(
+      responseType: ResponseType.stream,
+      headers: {if (exist > 0) 'Range': 'bytes=$exist-', 'User-Agent': 'Mozilla/5.0'},
+    ));
     final part = res.statusCode == 206;
     if (!part && exist > 0) { exist = 0; t.downloadedBytes = 0; }
     final len = int.tryParse(res.headers.value(Headers.contentLengthHeader) ?? '0') ?? 0;
@@ -311,7 +467,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(controller: _urlCtrl, decoration: const InputDecoration(hintText: 'Paste Direct, YT, FB or TikTok link...')),
+              TextField(controller: _urlCtrl, decoration: const InputDecoration(hintText: 'Paste FB, Reels, TikTok, YT or Direct link...')),
               const SizedBox(height: 12),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -337,15 +493,15 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     );
   }
 
-  @override
+ @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF151C2C),
-        title: const Text('RDM PRO v1.3', style: TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.w900)),
+        title: const Text('RDM PRO v1.4', style: TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.w900)),
       ),
       body: _tasks.isEmpty
-          ? const Center(child: Text('Turbo 8x & Social Engine Ready\nTap + to start downloading', textAlign: TextAlign.center, style: TextStyle(color: Color(0xFF00FF87))))
+          ? const Center(child: Text('Native FB/Social Scraper & 8x Engine Ready\nTap Turbo Link to start', textAlign: TextAlign.center, style: TextStyle(color: Color(0xFF00FF87))))
           : ListView.builder(
               padding: const EdgeInsets.all(12), itemCount: _tasks.length,
               itemBuilder: (ctx, i) {
@@ -414,4 +570,4 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     );
   }
 }
-// END OF RDM PRO
+// END OF RDM PRO v1.4
