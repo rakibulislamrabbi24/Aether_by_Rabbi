@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -169,11 +170,10 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
       ),
     );
 
-    List> foundStreams = [];
+    List<Map<String, String>> foundStreams = [];
     final lower = pageUrl.toLowerCase();
 
     try {
-      // ১. নিজস্ব লোকাল স্ক্র্যাপার (Facebook, Reels, Instagram, TikTok)
       if (lower.contains('facebook.com') || lower.contains('fb.watch') || lower.contains('fb.com') || lower.contains('instagram.com')) {
         foundStreams = await _scrapeFacebookOrInsta(pageUrl);
       } else if (lower.contains('youtube.com') || lower.contains('youtu.be')) {
@@ -199,20 +199,17 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     }
   }
 
-  // ফেসবুক ও ইন্সটাগ্রাম নেটিভ ডিরেক্ট গ্র্যাবার (No Third-Party Server Needed!)
-  Future<List>> _scrapeFacebookOrInsta(String url) async {
-    List> list = [];
+  Future<List<Map<String, String>>> _scrapeFacebookOrInsta(String url) async {
+    List<Map<String, String>> list = [];
     final headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
-      'Sec-Fetch-Mode': 'navigate',
     };
 
     final res = await _dio.get<String>(url, options: Options(headers: headers, followRedirects: true, validateStatus: (s) => true));
     String html = res.data ?? '';
 
-    // মোবাইল বা রিলস লিংক হলে ডেস্কটপ/এমবেড ভার্সনও চেক করা হবে
     if (!html.contains('.mp4')) {
       final mbUrl = url.replaceFirst('www.facebook.com', 'm.facebook.com');
       final res2 = await _dio.get<String>(mbUrl, options: Options(headers: {
@@ -237,7 +234,6 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
       }
     });
 
-    // যদি উপরের কী-ওয়ার্ড ছাড়া সরাসরি mp4 স্ট্রিম থাকে
     if (list.isEmpty) {
       final rawMp4 = RegExp(r'"(https?:\\?/\\?/[^"]*?\.mp4[^"]*?)"').allMatches(html);
       int count = 1;
@@ -252,9 +248,8 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     return list;
   }
 
-  // টিকটক ডিরেক্ট গ্র্যাবার (TikWM Public API)
-  Future<List>> _scrapeTikTok(String url) async {
-    List> list = [];
+  Future<List<Map<String, String>>> _scrapeTikTok(String url) async {
+    List<Map<String, String>> list = [];
     try {
       final r = await _dio.post('https://www.tikwm.com/api/', data: {'url': url, 'hd': 1});
       if (r.data is Map && r.data['data'] != null) {
@@ -267,9 +262,8 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     return list;
   }
 
-  // ইউটিউব মাল্টি-নোড এক্সট্রাক্টর (Piped Open Nodes)
-  Future<List>> _scrapeYouTube(String url) async {
-    List> list = [];
+  Future<List<Map<String, String>>> _scrapeYouTube(String url) async {
+    List<Map<String, String>> list = [];
     String? vid;
     final reg = RegExp(r'(?:v=|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})');
     final m = reg.firstMatch(url);
@@ -312,7 +306,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     return list;
   }
 
-  void _showStreamPicker(List> streams, int threads) {
+  void _showStreamPicker(List<Map<String, String>> streams, int threads) {
     showModalBottomSheet(
       context: context, backgroundColor: const Color(0xFF151C2C),
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
@@ -493,7 +487,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     );
   }
 
- @override
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
