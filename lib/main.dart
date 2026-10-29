@@ -6,22 +6,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-    FlutterLocalNotificationsPlugin();
-
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-
-  const AndroidInitializationSettings initializationSettingsAndroid =
-      AndroidInitializationSettings('@mipmap/ic_launcher');
-
-  const InitializationSettings initializationSettings =
-      InitializationSettings(android: initializationSettingsAndroid);
-
-  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
-
   runApp(const RDMProApp());
 }
 
@@ -130,12 +117,11 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
   Future<void> _requestPermissions() async {
     await Permission.storage.request();
     await Permission.manageExternalStorage.request();
-    await Permission.notification.request();
   }
 
   Future<void> _loadHistory() async {
     final prefs = await SharedPreferences.getInstance();
-    final List<String>? list = prefs.getStringList('rdm_tasks_v2');
+    final List<String>? list = prefs.getStringList('rdm_tasks_v3');
     if (list != null) {
       setState(() {
         _tasks = list.map((item) => DownloadTask.fromJson(jsonDecode(item))).toList();
@@ -146,7 +132,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
   Future<void> _saveHistory() async {
     final prefs = await SharedPreferences.getInstance();
     final List<String> list = _tasks.map((task) => jsonEncode(task.toJson())).toList();
-    await prefs.setStringList('rdm_tasks_v2', list);
+    await prefs.setStringList('rdm_tasks_v3', list);
   }
 
   Future<String> _getDownloadFolderPath(String fileName) async {
@@ -159,26 +145,6 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
       }
     }
     return '${dir.path}/$fileName';
-  }
-
-  Future<void> _showNotification(String title, String body, int id) async {
-    const AndroidNotificationDetails androidPlatformChannelSpecifics =
-        AndroidNotificationDetails(
-      'rdm_downloads',
-      'RDM Pro Downloads',
-      channelDescription: 'Active download progress and status',
-      importance: Importance.low,
-      priority: Priority.low,
-      ongoing: true,
-      showWhen: false,
-    );
-    const NotificationDetails platformChannelSpecifics =
-        NotificationDetails(android: androidPlatformChannelSpecifics);
-    await flutterLocalNotificationsPlugin.show(id, title, body, platformChannelSpecifics);
-  }
-
-  Future<void> _cancelNotification(int id) async {
-    await flutterLocalNotificationsPlugin.cancel(id);
   }
 
   Future<void> _addNewDownload(String url) async {
@@ -218,8 +184,6 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
       task.speed = 'Connecting...';
     });
     await _saveHistory();
-
-    final notifId = int.parse(task.id.substring(task.id.length - 6));
 
     try {
       final response = await _dio.get<ResponseBody>(
@@ -263,15 +227,6 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
 
           setState(() => task.speed = speedText);
           _saveHistory();
-
-          // নোটিফিকেশন বারে রিয়েল-টাইম আপডেট
-          final percent = (task.progress * 100).toStringAsFixed(0);
-          _showNotification(
-            'Downloading: ${task.fileName}',
-            '$percent% completed • $speedText',
-            notifId,
-          );
-
           lastBytes = task.downloadedBytes;
           lastTime = now;
         }
@@ -284,10 +239,8 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
           task.speed = 'Done';
         });
         await _saveHistory();
-        _cancelNotification(notifId);
       }
     } catch (e) {
-      _cancelNotification(notifId);
       if (e is DioException && CancelToken.isCancel(e)) {
         setState(() {
           task.status = 'Paused';
@@ -390,7 +343,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
               child: const Text('RDM', style: TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.w900)),
             ),
             const SizedBox(width: 8),
-            const Text('PRO v1.2', style: TextStyle(color: Color(0xFF00FF87), fontWeight: FontWeight.bold, fontSize: 15)),
+            const Text('PRO v1.2.1', style: TextStyle(color: Color(0xFF00FF87), fontWeight: FontWeight.bold, fontSize: 15)),
           ],
         ),
       ),
@@ -403,7 +356,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
                   SizedBox(height: 12),
                   Text('RDM Pro Engine Ready', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                   SizedBox(height: 6),
-                  Text('Background & Notification Sync Active', style: TextStyle(color: Color(0xFF00FF87), fontSize: 13)),
+                  Text('Direct Release & Resume Active', style: TextStyle(color: Color(0xFF00FF87), fontSize: 13)),
                 ],
               ),
             )
