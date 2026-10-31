@@ -1,8 +1,8 @@
-name: Build and Release RDM Pro APK
-
+name: Build APK
 on:
   push:
-    branches: [ "main", "master" ]
+    paths:
+      - 'project.zip'
   workflow_dispatch:
 
 permissions:
@@ -11,51 +11,30 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - name: Unzip project
+        run: unzip -q project.zip -d app_project
+
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: temurin
           java-version: '17'
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          channel: 'stable'
+          gradle-version: '8.9'
 
-      - name: Safely Generate Android Platform & Permissions
-        run: |
-          cp pubspec.yaml pubspec.yaml.bak
-          cp lib/main.dart main.dart.bak
-          flutter create --org com.rabbi --project-name rdm_pro .
-          rm -rf test
-          mv pubspec.yaml.bak pubspec.yaml
-          mv main.dart.bak lib/main.dart
-          sed -i '/<application/i <uses-permission android:name="android.permission.INTERNET"/>\n<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>\n<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n<uses-permission android:name="android.permission.WAKE_LOCK"/>' android/app/src/main/AndroidManifest.xml
-          sed -i 's/android:label="rdm_pro"/android:label="RDM Pro"/g' android/app/src/main/AndroidManifest.xml
-          sed -i 's/<application/<application android:requestLegacyExternalStorage="true"/g' android/app/src/main/AndroidManifest.xml
+      - name: Build APK
+        working-directory: app_project
+        run: gradle assembleDebug --no-daemon
 
-      - name: Install Dependencies
-        run: flutter pub get
-
-      - name: Verify Code Syntax
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
-
-      - name: Build Release APK
-        run: |
-          flutter build apk --release
-          cp build/app/outputs/flutter-apk/app-release.apk RDM-Pro-v1.3.apk
-
-      - name: Create GitHub Release & Upload APK
-        uses: ncipollo/release-action@v1
+      - name: Publish to Releases
+        uses: softprops/action-gh-release@v2
         with:
-          artifacts: "RDM-Pro-v1.3.apk"
-          tag: "v1.3-${{ github.run_number }}"
-          name: "RDM Pro v1.3 Turbo & Social (Build ${{ github.run_number }})"
-          token: ${{ secrets.GITHUB_TOKEN }}
-          allowUpdates: true
-          
+          tag_name: build-${{ github.run_number }}
+          name: RDM Pro build ${{ github.run_number }}
+          files: app_project/app/build/outputs/apk/debug/app-debug.apk
