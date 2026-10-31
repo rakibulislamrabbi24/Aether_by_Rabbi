@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -87,7 +88,12 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
   List<DownloadTask> _tasks = [];
   final Dio _dio = Dio();
   final TextEditingController _urlCtrl = TextEditingController();
+  final TextEditingController _browserUrlCtrl = TextEditingController(text: 'https://m.facebook.com');
   int _tab = 0, _threads = 8;
+
+  late final WebViewController _webCtrl;
+  final List> _sniffedMedia = [];
+  Timer? _sniffTimer;
 
   @override
   void initState() {
@@ -95,10 +101,71 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     WidgetsBinding.instance.addObserver(this);
     _loadHistory();
     [Permission.storage, Permission.manageExternalStorage].request();
+    _initBrowser();
+  }
+
+  void _initBrowser() {
+    _webCtrl = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setUserAgent('Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36')
+      ..setNavigationDelegate(NavigationDelegate(
+        onPageStarted: (u) {
+          _browserUrlCtrl.text = u;
+          setState(() => _sniffedMedia.clear());
+        },
+        onPageFinished: (_) => _scanWebViewForVideos(),
+      ))
+      ..loadRequest(Uri.parse('https://www.google.com'));
+
+    _sniffTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (_tab == 1) _scanWebViewForVideos();
+    });
+  }
+
+  Future<void> _scanWebViewForVideos() async {
+    try {
+      const js = '''
+        (function() {
+          var links = [];
+          var vids = document.querySelectorAll('video, source');
+          for (var i = 0; i < vids.length; i++) {
+            var s = vids[i].src || vids[i].currentSrc;
+            if (s && s.indexOf('http') === 0 && s.indexOf('blob:') === -1) links.push(s);
+          }
+          var html = document.documentElement.innerHTML;
+          var rx = /"(https?:\\\\?\\/\\\\?\\/[^"]+\\.(?:mp4|m3u8)[^"]*)"/g;
+          var m;
+          while ((m = rx.exec(html)) !== null && links.length < 8) {
+            links.push(m[1].replace(/\\\\\\//g, '/').replace(/\\\\u0025/g, '%').replace(/\\\\u0026/g, '&').replace(/&amp;/g, '&'));
+          }
+          return JSON.stringify(links);
+        })();
+      ''';
+      final res = await _webCtrl.runJavaScriptReturningResult(js);
+      String raw = res.toString();
+      if (raw.startsWith('"') && raw.endsWith('"')) {
+        raw = jsonDecode(raw).toString();
+      }
+      final List<dynamic> urls = jsonDecode(raw);
+      bool added = false;
+      for (final u in urls) {
+        final link = u.toString();
+        if (link.startsWith('http') && !_sniffedMedia.any((e) => e['url'] == link)) {
+          _sniffedMedia.add({
+            'label': link.contains('hd') ? 'Sniffed HD Video (MP4)' : 'Detected Video Stream #${_sniffedMedia.length + 1}',
+            'url': link,
+            'ext': link.contains('.m3u8') ? 'mp4' : 'mp4',
+          });
+          added = true;
+        }
+      }
+      if (added && mounted) setState(() {});
+    } catch (_) {}
   }
 
   @override
   void dispose() {
+    _sniffTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _saveHistory();
     super.dispose();
@@ -111,13 +178,13 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
 
   Future<void> _loadHistory() async {
     final p = await SharedPreferences.getInstance();
-    final l = p.getStringList('rdm_tasks_v7');
+    final l = p.getStringList('rdm_tasks_v8');
     if (l != null) setState(() => _tasks = l.map((e) => DownloadTask.fromJson(jsonDecode(e))).toList());
   }
 
   Future<void> _saveHistory() async {
     final p = await SharedPreferences.getInstance();
-    await p.setStringList('rdm_tasks_v7', _tasks.map((t) => jsonEncode(t.toJson())).toList());
+    await p.setStringList('rdm_tasks_v8', _tasks.map((t) => jsonEncode(t.toJson())).toList());
   }
 
   Future<String> _getSavePath(String name) async {
@@ -144,7 +211,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     }
   }
 
-  String _cleanEscapedUrl(String raw) {
+  String _cleanUrl(String raw) {
     return raw
         .replaceAll(r'\/', '/')
         .replaceAll(r'\u0025', '%')
@@ -164,70 +231,119 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
           children: [
             CircularProgressIndicator(color: Color(0xFF00F0FF)),
             SizedBox(width: 16),
-            Expanded(child: Text('Scanning page for direct video streams...')),
+            Expanded(child: Text('Bypassing protection & extracting streams...')),
           ],
         ),
       ),
     );
 
-    List<Map<String, String>> foundStreams = [];
+    List> found = [];
     final lower = pageUrl.toLowerCase();
 
     try {
       if (lower.contains('facebook.com') || lower.contains('fb.watch') || lower.contains('fb.com') || lower.contains('instagram.com')) {
-        foundStreams = await _scrapeFacebookOrInsta(pageUrl);
+        found = await _scrapeFacebookMultiLayer(pageUrl);
       } else if (lower.contains('youtube.com') || lower.contains('youtu.be')) {
-        foundStreams = await _scrapeYouTube(pageUrl);
+        found = await _scrapeYouTube(pageUrl);
       } else if (lower.contains('tiktok.com')) {
-        foundStreams = await _scrapeTikTok(pageUrl);
+        found = await _scrapeTikTok(pageUrl);
       }
     } catch (_) {}
 
     if (mounted) Navigator.pop(context);
 
-    if (foundStreams.isNotEmpty) {
-      _showStreamPicker(foundStreams, threads);
+    if (found.isNotEmpty) {
+      _showStreamPicker(found, threads);
     } else {
+      // ডিরেক্ট স্ক্র্যাপ না হলে অটোমেটিক 1DM স্টাইল বিল্ট-ইন ব্রাউজার স্নিফারে ওপেন হবে!
+      setState(() => _tab = 1);
+      _browserUrlCtrl.text = pageUrl;
+      _webCtrl.loadRequest(Uri.parse(pageUrl));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Could not extract private/encrypted link! Make sure the video is Public.'),
-            backgroundColor: Colors.redAccent,
+            content: Text('Opened in RDM Sniffer Browser! Tap Play on the video to grab it.'),
+            backgroundColor: Color(0xFF00F0FF),
+             behavior: SnackBarBehavior.floating,
           ),
         );
       }
     }
   }
 
-  Future<List<Map<String, String>>> _scrapeFacebookOrInsta(String url) async {
-    List<Map<String, String>> list = [];
-    final headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-    };
+  // ৪-লেয়ার ফেসবুক ও রিলস এক্সট্রাক্টর (Share Link Resolver + Embed Bypass + FDown API)
+  Future<List>> _scrapeFacebookMultiLayer(String inputUrl) async {
+    List> list = [];
+    String targetUrl = inputUrl;
 
-    final res = await _dio.get<String>(url, options: Options(headers: headers, followRedirects: true, validateStatus: (s) => true));
-    String html = res.data ?? '';
+    // লেয়ার ১: facebook.com/share/v/... বা fb.watch শর্ট লিংক থেকে আসল লিংক বের করা
+    try {
+      final r0 = await _dio.get<String>(inputUrl, options: Options(
+        headers: {'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'},
+        followRedirects: true, validateStatus: (s) => true,
+      ));
+      final realUri = r0.realUri.toString();
+      if (realUri.isNotEmpty && !realUri.contains('/login')) targetUrl = realUri;
+      final ogUrl = RegExp(r'property="og:url"\s+content="([^"]+)"').firstMatch(r0.data ?? '');
+      if (ogUrl != null && ogUrl.group(1) != null) targetUrl = _cleanUrl(ogUrl.group(1)!);
+    } catch (_) {}
 
-    if (!html.contains('.mp4')) {
-      final mbUrl = url.replaceFirst('www.facebook.com', 'm.facebook.com');
-      final res2 = await _dio.get<String>(mbUrl, options: Options(headers: {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-      }, followRedirects: true, validateStatus: (s) => true));
-      html += '\n${res2.data ?? ''}';
+    // লেয়ার ২: FDown ফর্ম পোস্ট মেথড
+    try {
+      final fRes = await _dio.post<String>(
+        'https://fdown.net/download.php',
+        data: 'URLz=${Uri.encodeComponent(targetUrl)}',
+        options: Options(headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0',
+          'Origin': 'https://fdown.net',
+          'Referer': 'https://fdown.net/',
+        }, validateStatus: (s) => true),
+      );
+      final fHtml = fRes.data ?? '';
+      final hdMatch = RegExp(r'id="hdlink"\s+href="([^"]+)"').firstMatch(fHtml);
+      final sdMatch = RegExp(r'id="sdlink"\s+href="([^"]+)"').firstMatch(fHtml);
+      if (hdMatch != null) list.add({'label': 'Full HD Video (MP4)', 'url': _cleanUrl(hdMatch.group(1)!), 'ext': 'mp4'});
+      if (sdMatch != null) list.add({'label': 'Standard SD Video (MP4)', 'url': _cleanUrl(sdMatch.group(1)!), 'ext': 'mp4'});
+      if (list.isNotEmpty) return list;
+    } catch (_) {}
+
+    // লেয়ার ৩: ফেসবুক এমবেড প্লেয়ার বাইপাস (No Login Wall!)
+    final urlsToScan = [
+      'https://www.facebook.com/plugins/video.php?href=${Uri.encodeComponent(targetUrl)}&show_text=false',
+      targetUrl,
+      targetUrl.replaceFirst('www.facebook.com', 'm.facebook.com'),
+    ];
+
+    final uAgents = [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+    ];
+
+    String combinedHtml = '';
+    for (final u in urlsToScan) {
+      for (final ua in uAgents) {
+        try {
+          final r = await _dio.get<String>(u, options: Options(
+            headers: {'User-Agent': ua, 'Accept-Language': 'en-US,en;q=0.9'},
+            followRedirects: true, validateStatus: (s) => true,
+            receiveTimeout: const Duration(seconds: 6),
+          ));
+          combinedHtml += '\n${r.data ?? ''}';
+        } catch (_) {}
+      }
     }
 
     final Map<String, RegExp> patterns = {
       'Full HD Video (MP4)': RegExp(r'"(?:playable_url_quality_hd|hd_src|hd_src_no_ratelimit|browser_native_hd_url)"\s*:\s*"([^"]+)"'),
       'Standard SD Video (MP4)': RegExp(r'"(?:playable_url|sd_src|sd_src_no_ratelimit|browser_native_sd_url|video_url)"\s*:\s*"([^"]+)"'),
-      'Direct Meta Video (MP4)': RegExp(r'property="og:video(?::url|:secure_url)?"\s+content="([^"]+)"'),
+      'Meta Direct Video (MP4)': RegExp(r'property="og:video(?::url|:secure_url)?"\s+content="([^"]+)"'),
     };
 
     patterns.forEach((label, reg) {
-      final match = reg.firstMatch(html);
-      if (match != null && match.group(1) != null) {
-        final link = _cleanEscapedUrl(match.group(1)!);
+      final m = reg.firstMatch(combinedHtml);
+      if (m != null && m.group(1) != null) {
+        final link = _cleanUrl(m.group(1)!);
         if (link.startsWith('http') && !list.any((e) => e['url'] == link)) {
           list.add({'label': label, 'url': link, 'ext': 'mp4'});
         }
@@ -235,21 +351,21 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     });
 
     if (list.isEmpty) {
-      final rawMp4 = RegExp(r'"(https?:\\?/\\?/[^"]*?\.mp4[^"]*?)"').allMatches(html);
-      int count = 1;
-      for (final m in rawMp4.take(3)) {
-        final link = _cleanEscapedUrl(m.group(1)!);
-        if (!list.any((e) => e['url'] == link)) {
-          list.add({'label': 'Video Stream #$count (MP4)', 'url': link, 'ext': 'mp4'});
-          count++;
+      final rawMp4 = RegExp(r'"(https?:\\?/\\?/[^"]*?\.mp4[^"]*?)"').allMatches(combinedHtml);
+      int c = 1;
+      for (final m in rawMp4.take(4)) {
+        final link = _cleanUrl(m.group(1)!);
+        if (link.contains('fbcdn') && !list.any((e) => e['url'] == link)) {
+          list.add({'label': 'FB Video Stream #$c (MP4)', 'url': link, 'ext': 'mp4'});
+          c++;
         }
       }
     }
     return list;
   }
 
-  Future<List<Map<String, String>>> _scrapeTikTok(String url) async {
-    List<Map<String, String>> list = [];
+  Future<List>> _scrapeTikTok(String url) async {
+    List> list = [];
     try {
       final r = await _dio.post('https://www.tikwm.com/api/', data: {'url': url, 'hd': 1});
       if (r.data is Map && r.data['data'] != null) {
@@ -262,42 +378,33 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     return list;
   }
 
-  Future<List<Map<String, String>>> _scrapeYouTube(String url) async {
-    List<Map<String, String>> list = [];
+  Future<List>> _scrapeYouTube(String url) async {
+    List> list = [];
     String? vid;
-    final reg = RegExp(r'(?:v=|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})');
-    final m = reg.firstMatch(url);
+    final m = RegExp(r'(?:v=|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})').firstMatch(url);
     if (m != null) vid = m.group(1);
     if (vid == null) return list;
 
     final nodes = [
       'https://pipedapi.kavin.rocks',
       'https://pipedapi.tokhmi.xyz',
-      'https://pipedapi.moomoo.me',
-      'https://api.piped.projectsegfau.lt',
+      'https://pipedapi.syncpundit.io',
+      'https://api.piped.yt',
     ];
 
     for (final node in nodes) {
       try {
-        final r = await _dio.get('$node/streams/$vid', options: Options(receiveTimeout: const Duration(seconds: 8)));
+        final r = await _dio.get('$node/streams/$vid', options: Options(receiveTimeout: const Duration(seconds: 6)));
         if (r.data is Map) {
           final vStreams = (r.data['videoStreams'] as List?) ?? [];
           for (final vs in vStreams) {
             if (vs['videoOnly'] == false && vs['url'] != null) {
-              list.add({
-                'label': 'Video • ${vs['quality']} (${vs['format']})',
-                'url': vs['url'].toString(),
-                'ext': 'mp4',
-              });
+              list.add({'label': 'Video • ${vs['quality']} (MP4)', 'url': vs['url'].toString(), 'ext': 'mp4'});
             }
           }
           final aStreams = (r.data['audioStreams'] as List?) ?? [];
           if (aStreams.isNotEmpty && aStreams.first['url'] != null) {
-            list.add({
-              'label': 'Audio Only • High Bitrate (M4A/MP3)',
-              'url': aStreams.first['url'].toString(),
-              'ext': 'm4a',
-            });
+            list.add({'label': 'Audio Only • High Quality (M4A)', 'url': aStreams.first['url'].toString(), 'ext': 'm4a'});
           }
           if (list.isNotEmpty) break;
         }
@@ -306,14 +413,14 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     return list;
   }
 
-  void _showStreamPicker(List<Map<String, String>> streams, int threads) {
+  void _showStreamPicker(List> streams, int threads) {
     showModalBottomSheet(
       context: context, backgroundColor: const Color(0xFF151C2C),
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (ctx) => ListView(
         shrinkWrap: true, padding: const EdgeInsets.all(16),
         children: [
-          Text('Streams Found (Turbo ${threads}x Ready)', style: const TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.bold, fontSize: 16)),
+          Text('Select Stream (${threads}x Turbo Boost)', style: const TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.bold, fontSize: 16)),
           const Divider(color: Colors.white24),
           ...streams.map((s) => ListTile(
             leading: Icon(s['ext'] == 'mp3' || s['ext'] == 'm4a' ? Icons.audiotrack : Icons.videocam, color: const Color(0xFF00FF87)),
@@ -321,6 +428,7 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
             trailing: const Icon(Icons.download_for_offline, color: Color(0xFF00F0FF)),
             onTap: () {
               Navigator.pop(ctx);
+              setState(() => _tab = 0);
               final name = 'RDM_${DateTime.now().millisecondsSinceEpoch}.${s['ext']}';
               _addTask(s['url']!, name, threads);
             },
@@ -487,71 +595,128 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     );
   }
 
+  Widget _buildBrowserTab() {
+    return Column(
+      children: [
+        Container(
+          color: const Color(0xFF151C2C),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Row(
+            children: [
+              IconButton(icon: const Icon(Icons.arrow_back_ios, size: 18), onPressed: () => _webCtrl.goBack()),
+              Expanded(
+                child: TextField(
+                  controller: _browserUrlCtrl,
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    filled: true, fillColor: const Color(0xFF0A0E17),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+                    hintText: 'Enter website URL...',
+                  ),
+                  onSubmitted: (v) {
+                    String u = v.trim();
+                    if (!u.startsWith('http')) u = 'https://$u';
+                    _webCtrl.loadRequest(Uri.parse(u));
+                  },
+                ),
+              ),
+              IconButton(icon: const Icon(Icons.refresh, color: Color(0xFF00F0FF)), onPressed: () => _webCtrl.reload()),
+            ],
+          ),
+        ),
+        Expanded(child: WebViewWidget(controller: _webCtrl)),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF151C2C),
-        title: const Text('RDM PRO v1.4', style: TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.w900)),
-      ),
-      body: _tasks.isEmpty
-          ? const Center(child: Text('Native FB/Social Scraper & 8x Engine Ready\nTap Turbo Link to start', textAlign: TextAlign.center, style: TextStyle(color: Color(0xFF00FF87))))
-          : ListView.builder(
-              padding: const EdgeInsets.all(12), itemCount: _tasks.length,
-              itemBuilder: (ctx, i) {
-                final t = _tasks[i], active = t.status == 'Downloading', done = t.status == 'Completed';
-                return Card(
-                  color: const Color(0xFF151C2C), margin: const EdgeInsets.only(bottom: 12),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Text('[${t.threads}x] ', style: const TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.bold)),
-                            Expanded(child: Text(t.fileName, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold))),
-                            if (!done) IconButton(
-                              icon: Icon(active ? Icons.pause_circle : Icons.play_circle, color: const Color(0xFF00FF87)),
-                              onPressed: () { if (active) { t.cancelToken?.cancel(); setState(() => t.status = 'Paused'); } else { _startTask(t); } },
-                            ),
-                            IconButton(icon: const Icon(Icons.delete, color: Colors.redAccent), onPressed: () { t.cancelToken?.cancel(); setState(() => _tasks.removeAt(i)); _saveHistory(); }),
-                          ],
-                        ),
-                        LinearProgressIndicator(value: t.progress, minHeight: 6, backgroundColor: const Color(0xFF0A0E17), valueColor: const AlwaysStoppedAnimation(Color(0xFF00F0FF))),
-                        if (t.threads > 1 && !done) Padding(
-                          padding: const EdgeInsets.only(top: 6),
-                          child: Row(
-                            children: List.generate(t.threads, (pi) => Expanded(
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 1),
-                                child: LinearProgressIndicator(value: pi < t.partProgress.length ? t.partProgress[pi] : 0.0, minHeight: 3, valueColor: const AlwaysStoppedAnimation(Color(0xFF00FF87))),
-                              ),
-                            )),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text('${_fmt(t.downloadedBytes)} / ${_fmt(t.totalBytes)} (${(t.progress * 100).toStringAsFixed(1)}%)', style: const TextStyle(fontSize: 12, color: Colors.white70)),
-                            Text('${t.status} • ${t.speed}', style: const TextStyle(fontSize: 12, color: Color(0xFF00FF87), fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                        if (done) Padding(
-                          padding: const EdgeInsets.only(top: 6),
-                          child: Text('Saved: ${t.savePath}', style: const TextStyle(fontSize: 11, color: Color(0xFF00F0FF))),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
+        title: const Text('RDM PRO v1.5', style: TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.w900)),
+        actions: [
+          if (_tab == 1)
+            TextButton.icon(
+              icon: const Icon(Icons.radar, color: Color(0xFF00FF87)),
+              label: Text('Sniff (${_sniffedMedia.length})', style: const TextStyle(color: Color(0xFF00FF87), fontWeight: FontWeight.bold)),
+              onPressed: () {
+                _scanWebViewForVideos();
+                if (_sniffedMedia.isNotEmpty) _showStreamPicker(_sniffedMedia, _threads);
               },
             ),
-      floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: const Color(0xFF00F0FF), foregroundColor: Colors.black,
-        onPressed: _showAddDialog, icon: const Icon(Icons.bolt), label: const Text('Turbo Link', style: TextStyle(fontWeight: FontWeight.bold)),
+        ],
       ),
+      body: _tab == 1
+          ? _buildBrowserTab()
+          : (_tasks.isEmpty
+              ? const Center(child: Text('4-Layer Social & Browser Sniffer Ready\nTap Turbo Link or use Browser Tab', textAlign: TextAlign.center, style: TextStyle(color: Color(0xFF00FF87))))
+              : ListView.builder(
+                  padding: const EdgeInsets.all(12), itemCount: _tasks.length,
+                  itemBuilder: (ctx, i) {
+                    final t = _tasks[i], active = t.status == 'Downloading', done = t.status == 'Completed';
+                    return Card(
+                      color: const Color(0xFF151C2C), margin: const EdgeInsets.only(bottom: 12),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Text('[${t.threads}x] ', style: const TextStyle(color: Color(0xFF00F0FF), fontWeight: FontWeight.bold)),
+                                Expanded(child: Text(t.fileName, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold))),
+                                if (!done) IconButton(
+                                  icon: Icon(active ? Icons.pause_circle : Icons.play_circle, color: const Color(0xFF00FF87)),
+                                  onPressed: () { if (active) { t.cancelToken?.cancel(); setState(() => t.status = 'Paused'); } else { _startTask(t); } },
+                                ),
+                                IconButton(icon: const Icon(Icons.delete, color: Colors.redAccent), onPressed: () { t.cancelToken?.cancel(); setState(() => _tasks.removeAt(i)); _saveHistory(); }),
+                              ],
+                            ),
+                            LinearProgressIndicator(value: t.progress, minHeight: 6, backgroundColor: const Color(0xFF0A0E17), valueColor: const AlwaysStoppedAnimation(Color(0xFF00F0FF))),
+                            if (t.threads > 1 && !done) Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Row(
+                                children: List.generate(t.threads, (pi) => Expanded(
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 1),
+                                    child: LinearProgressIndicator(value: pi < t.partProgress.length ? t.partProgress[pi] : 0.0, minHeight: 3, valueColor: const AlwaysStoppedAnimation(Color(0xFF00FF87))),
+                                  ),
+                                )),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text('${_fmt(t.downloadedBytes)} / ${_fmt(t.totalBytes)} (${(t.progress * 100).toStringAsFixed(1)}%)', style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                                Text('${t.status} • ${t.speed}', style: const TextStyle(fontSize: 12, color: Color(0xFF00FF87), fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                            if (done) Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Text('Saved: ${t.savePath}', style: const TextStyle(fontSize: 11, color: Color(0xFF00F0FF))),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                )),
+      floatingActionButton: _tab == 1
+          ? (_sniffedMedia.isNotEmpty
+              ? FloatingActionButton.extended(
+                  backgroundColor: const Color(0xFF00FF87), foregroundColor: Colors.black,
+                  onPressed: () => _showStreamPicker(_sniffedMedia, _threads),
+                  icon: const Icon(Icons.download_rounded),
+                  label: Text('Download Media (${_sniffedMedia.length})', style: const TextStyle(fontWeight: FontWeight.w900)),
+                )
+              : null)
+          : FloatingActionButton.extended(
+              backgroundColor: const Color(0xFF00F0FF), foregroundColor: Colors.black,
+              onPressed: _showAddDialog, icon: const Icon(Icons.bolt), label: const Text('Turbo Link', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
       bottomNavigationBar: BottomNavigationBar(
         backgroundColor: const Color(0xFF151C2C), selectedItemColor: const Color(0xFF00F0FF),
         currentIndex: _tab, onTap: (v) => setState(() => _tab = v),
@@ -564,4 +729,4 @@ class _RDMHomeScreenState extends State<RDMHomeScreen> with WidgetsBindingObserv
     );
   }
 }
-// END OF RDM PRO v1.4
+// END OF RDM PRO v1.5
