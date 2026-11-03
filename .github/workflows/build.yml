@@ -1,4 +1,4 @@
-name: Build APK
+name: Build Aether APK
 on:
   push:
     paths:
@@ -34,9 +34,12 @@ jobs:
         working-directory: app_project
         run: gradle assembleDebug --no-daemon
 
+      - name: Name the APK
+        run: cp app_project/app/build/outputs/apk/debug/app-debug.apk Aether-build-${{ github.run_number }}.apk
+
       - name: Publish to Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: RDM Pro build ${{ github.run_number }}
-          files: app_project/app/build/outputs/apk/debug/app-debug.apk
+          name: Aether build ${{ github.run_number }}
+          files: Aether-build-${{ github.run_number }}.apk
